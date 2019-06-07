@@ -76,21 +76,43 @@ def maskrcnn_inference(x, labels):
     return mask_prob
 
 
-def project_masks_on_boxes(gt_masks, boxes, matched_idxs, M):
+def project_masks_on_boxes(gt_masks, gt_minimasks, gt_boxes, proposals, matched_idxs, M):
     """
     Given segmentation masks and the bounding boxes corresponding
     to the location of the masks in the image, this function
     crops and resizes the masks in the position defined by the
     boxes. This prepares the masks for them to be fed to the
     loss computation as the targets.
+
+    Argu,ents:
+        gt_masks: Tensor[n, 1, H, W] or None
+        gt_mini_masks: Tensor[n, 1, mH, mW] or None
+        gt_boxes: Tensor[n, 4]
+        proposals: Tensor[p, 4]
+        match_idxs: Tensor[p] gives the index of the target (mask/box) to extract from for each proposal
     """
-    matched_idxs = matched_idxs.to(boxes)
-    rois = torch.cat([matched_idxs[:, None], boxes], dim=1)
-    gt_masks = gt_masks[:, None].to(rois)
-    return roi_align(gt_masks, rois, (M, M), 1)[:, 0]
+    matched_idxs = matched_idxs.to(proposals)
+    if gt_masks is not None:
+        # Targets are full-image size masks
+        rois = torch.cat([matched_idxs[:, None], proposals], dim=1)
+        gt_masks = gt_masks[:, None].to(rois)
+        return roi_align(gt_masks, rois, (M, M), 1)[:, 0]
+    else:
+        # Targets are mini-masks
+        mini_mask_size = [gt_minimasks.shape[3], gt_minimasks.shape[2], gt_minimasks.shape[3], gt_minimasks.shape[2]]
+        mini_mask_size = torch.tensor(mini_mask_size, dtype=torch.float, device=gt_minimasks.device)
+        gt_prop_boxes = gt_boxes[matched_idxs]
+        gt_pos = gt_prop_boxes[:, 0:2]
+        gt_sizes = gt_prop_boxes[:, 2:4] - gt_pos
+        gt_sizes2 = torch.cat([gt_sizes, gt_sizes], dim=1)
+        gt_pos2 = torch.cat([gt_pos, gt_pos], dim=1)
+        rel_proposals = (proposals - gt_pos2) / torch.clamp(gt_sizes2, min=1e-12)
+        rel_proposals = rel_proposals * mini_mask_size[None, :]
+        rois = torch.cat([matched_idxs[:, None], rel_proposals], dim=1)
+        return roi_align(gt_minimasks, rois, (M, M), 1)[:, 0]
 
 
-def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs):
+def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_mini_masks, gt_boxes, gt_labels, mask_matched_idxs):
     """
     Arguments:
         proposals (list[BoxList])
@@ -104,8 +126,8 @@ def maskrcnn_loss(mask_logits, proposals, gt_masks, gt_labels, mask_matched_idxs
     discretization_size = mask_logits.shape[-1]
     labels = [l[idxs] for l, idxs in zip(gt_labels, mask_matched_idxs)]
     mask_targets = [
-        project_masks_on_boxes(m, p, i, discretization_size)
-        for m, p, i in zip(gt_masks, proposals, mask_matched_idxs)
+        project_masks_on_boxes(m, mm, b, p, i, discretization_size)
+        for m, mm, b, p, i in zip(gt_masks, gt_mini_masks, gt_boxes, proposals, mask_matched_idxs)
     ]
 
     labels = torch.cat(labels, dim=0)
@@ -563,11 +585,13 @@ class RoIHeads(torch.nn.Module):
 
             loss_mask = {}
             if self.training:
-                gt_masks = [t["masks"] for t in targets]
+                gt_masks = [t.get("masks") for t in targets]
+                gt_mini_masks = [t.get("mini_masks") for t in targets]
                 gt_labels = [t["labels"] for t in targets]
+                gt_boxes = [t["boxes"] for t in targets]
                 loss_mask = maskrcnn_loss(
                     mask_logits, mask_proposals,
-                    gt_masks, gt_labels, pos_matched_idxs)
+                    gt_masks, gt_mini_masks, gt_boxes, gt_labels, pos_matched_idxs)
                 loss_mask = dict(loss_mask=loss_mask)
             else:
                 labels = [r["labels"] for r in result]
