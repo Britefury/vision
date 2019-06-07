@@ -84,12 +84,16 @@ def project_masks_on_boxes(gt_masks, gt_minimasks, gt_boxes, proposals, matched_
     boxes. This prepares the masks for them to be fed to the
     loss computation as the targets.
 
-    Argu,ents:
-        gt_masks: Tensor[n, 1, H, W] or None
-        gt_mini_masks: Tensor[n, 1, mH, mW] or None
-        gt_boxes: Tensor[n, 4]
-        proposals: Tensor[p, 4]
-        match_idxs: Tensor[p] gives the index of the target (mask/box) to extract from for each proposal
+    Arguments:
+        gt_masks: Tensor (N, 1, h, w) or None
+        gt_mini_masks: Tensor (N, 1, mini_h, mini_w) or None
+        gt_boxes: Tensor (N, 4)
+        proposals: Tensor (P, 4)
+        match_idxs: Tensor (P,) gives the index of the target (mask/box) to extract from for each proposal
+        M: network mask size
+
+    Return:
+        box_masks: Tensor (P, M, M)
     """
     matched_idxs = matched_idxs.to(proposals)
     if gt_masks is not None:
@@ -99,15 +103,19 @@ def project_masks_on_boxes(gt_masks, gt_minimasks, gt_boxes, proposals, matched_
         return roi_align(gt_masks, rois, (M, M), 1)[:, 0]
     else:
         # Targets are mini-masks
-        mini_mask_size = [gt_minimasks.shape[3], gt_minimasks.shape[2], gt_minimasks.shape[3], gt_minimasks.shape[2]]
-        mini_mask_size = torch.tensor(mini_mask_size, dtype=torch.float, device=gt_minimasks.device)
+        mini_mask_size2 = [gt_minimasks.shape[3], gt_minimasks.shape[2], gt_minimasks.shape[3], gt_minimasks.shape[2]]
+        mini_mask_size2 = torch.tensor(mini_mask_size2, dtype=torch.float, device=gt_minimasks.device)
+        # Match GT boxes to proposal boxes
         gt_prop_boxes = gt_boxes[matched_idxs]
+        # Get GT box positions and sizes
         gt_pos = gt_prop_boxes[:, 0:2]
         gt_sizes = gt_prop_boxes[:, 2:4] - gt_pos
-        gt_sizes2 = torch.cat([gt_sizes, gt_sizes], dim=1)
-        gt_pos2 = torch.cat([gt_pos, gt_pos], dim=1)
+        # Repeat sizes and positions for ops below
+        gt_sizes2 = gt_sizes.repeat(1, 2)
+        gt_pos2 = gt_pos.repeat(1, 2)
+        # Compute proposals relative to GT boxes
         rel_proposals = (proposals - gt_pos2) / torch.clamp(gt_sizes2, min=1e-12)
-        rel_proposals = rel_proposals * mini_mask_size[None, :]
+        rel_proposals = rel_proposals * mini_mask_size2[None, :]
         rois = torch.cat([matched_idxs[:, None], rel_proposals], dim=1)
         return roi_align(gt_minimasks, rois, (M, M), 1)[:, 0]
 
